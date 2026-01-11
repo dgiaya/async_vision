@@ -1,0 +1,12 @@
+name: vision
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - scipy
+  - opencv
+  - matplotlib
+  - pip:
+      - -e ./calibration/libs/aprilgrid
