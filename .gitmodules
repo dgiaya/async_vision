@@ -1,0 +1,3 @@
+[submodule "calibration/libs/aprilgrid"]
+	path = calibration/libs/aprilgrid
+	url = https://github.com/powei-lin/aprilgrid.git
