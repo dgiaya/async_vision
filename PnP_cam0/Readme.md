@@ -8,18 +8,15 @@ Estimates camera poses by detecting a planar AprilTag calibration grid and solvi
 
 ## Results
 
-**Dataset:** 1,411 frames (20 Hz, ~70 seconds)
+**Dataset:** 1,411 frames (20 Hz)
 
 **Detection Performance:**
 - Successful poses: 273/1,411 (19.3%)
 - Mean reprojection error: 0.687 px
 - Sub-pixel accuracy: 96.7% (264/273 frames < 1.0 px)
-- Mean tags detected: 54/54 per frame
 
 **Spatial Coverage:**
 - Camera path length: 35.0 m
-- Workspace volume: 2.6 m³
-- Position range: 2.6m × 1.8m × 2.0m
 
 ## Method
 
@@ -46,7 +43,7 @@ Estimates camera poses by detecting a planar AprilTag calibration grid and solvi
 - RANSAC consensus requires 10+ tags (40+ corner correspondences)
 - Frames with 1-2 tags produce unstable pose estimates
 - aprilgrid library avoids segmentation faults on cluttered backgrounds
-- Corner detection order: bottom-right → top-right → top-left → bottom-left
+- Corner detection order: bottom-right, top-right, top-left, bottom-left
 
 ## Configuration
 
@@ -84,10 +81,10 @@ output/
 ## Usage
 ```bash
 # Run detection and PnP estimation
-python Cam0PnP.py
+python3 Cam0PnP.py
 
 # Generate visualizations
-python result_plot.py
+python3 result_plot.py
 ```
 
 ## Dependencies
