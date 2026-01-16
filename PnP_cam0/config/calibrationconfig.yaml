@@ -1,0 +1,22 @@
+# AprilTag Calibration Configuration
+
+calibration:
+  tag_size: 0.038           # Physical size of ONE AprilTag in meters 
+  tag_family: "tag36h11"    # AprilTag family 
+  tag_rows: 9               # Number of tags vertically 
+  tag_cols: 6               # Number of tags horizontally 
+  tag_spacing: 0.27       # Distance between tag edges expressed as a fraction of tag size
+  min_corners: 4            # Minimum corners needed for PnP
+  ransac_reproj_threshold: 8.0
+  ransac_confidence: 0.99
+  
+# Camera 0 intrinsics
+
+cam0:
+  camera_name: "cam0"
+  image_width: 1280
+  image_height: 1024
+  camera_matrix: [1469.09537291, 0.0, 630.5921242, 0.0, 1471.57656321, 526.85937865, 0.0, 0.0, 1.0]
+  dist_coefficients: [-0.22721902, 0.17219749, 0.00045688, -0.00083218]
+
+

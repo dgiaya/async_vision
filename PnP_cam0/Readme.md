@@ -81,10 +81,10 @@ output/
 ## Usage
 ```bash
 # Run detection and PnP estimation
-python3 Cam0PnP.py
+python3 /scripts/Cam0PnP.py
 
 # Generate visualizations
-python3 result_plot.py
+python3 /scripts/result_plot.py
 ```
 
 ## Dependencies

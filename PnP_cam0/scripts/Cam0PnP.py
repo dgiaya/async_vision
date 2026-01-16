@@ -1016,7 +1016,7 @@ if __name__ == "__main__":
     # Configuration
     BAG_PATH = "/home/sid/ROAM_bag/Calib_merged.mcap"
     CAM0_IMAGE_TOPIC = "/cam_sync/cam0/image_raw/compressed"
-    CONFIG_PATH = "/home/sid/ROAM_bag/config/calibrationconfig.yaml"
+    CONFIG_PATH = "/home/sid/async_vision/PnP_cam0/config/calibrationconfig.yaml"
 
     # config
     config = LoadConfig.load_config(CONFIG_PATH, camera_name='cam0')
@@ -1061,5 +1061,3 @@ if __name__ == "__main__":
     # print("Saving mcap frame")
     # save_mcap_frame(BAG_PATH, CAM0_IMAGE_TOPIC, frame_number=0, output_path="frame_0000.jpg")
     # save_mcap_frame(BAG_PATH, CAM0_IMAGE_TOPIC, frame_number=150, output_path="frame_0150.jpg")
-
-# cv2.camera calibration Extended
