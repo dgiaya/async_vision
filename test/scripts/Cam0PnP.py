@@ -100,8 +100,8 @@ class PoseEstimate:
     timestamp: float
     R: np.ndarray #3x3 rotation matrix
     t: np.ndarray #3x1 translation vector
-    T: np.ndarray #4x4  homogeneous transformation matrix (target_to_cam0)
-    T_inv: np.ndarray #cam0_to_target
+    T: np.ndarray #4x4  homogeneous transformation matrix (T_destination_source)
+    T_inv: np.ndarray 
     num_inliers: int
     reprojection_error: float
     corner_ids: List[int] #which corners were detected
@@ -150,7 +150,11 @@ class ROSBagImageLoader:
             # schema = msg type definition, channel = topic info, message = raw bytes, ros_msg = deserialized ROS msg
             for schema, channel, message, ros_msg in reader.iter_decoded_messages(topics=[image_topic]):
                 try:
-                    cv_image = self.cvbridge.compressed_imgmsg_to_cv2(ros_msg, desired_encoding='bgr8') # --> (height,width,3) shape
+                    msg_type = type(ros_msg).__name__
+                    if msg_type == 'CompressedImage':
+                        cv_image = self.cvbridge.compressed_imgmsg_to_cv2(ros_msg, desired_encoding='bgr8') # --> (height,width,3) shape
+                    else:
+                        cv_image = self.cvbridge.imgmsg_to_cv2(ros_msg, desired_encoding='bgr8') # --> (height,width,3) shape
                     
                     # timestamp from message header in seconds
                     timestamp_sec = ros_msg.header.stamp.sec + ros_msg.header.stamp.nanosec * 1e-9
@@ -207,9 +211,11 @@ class Camera0PnP:
     rig_frame = camera 0 frame hence
     T_rig_to_cam0 = Identity
 
-    For each camera 0 frame, PnP gives => T_target_to_cam0
+    Notation = T_destination_source 
 
-    invert this => T_cam0_to_target = T_cam0(ti)
+    For each camera 0 frame, PnP gives => T_cam0_target (target to cam0, source=target, destination=cam0)
+
+    invert this => T_target_cam0 (source=cam0, destination=target)
     '''
 
     def __init__(self, config: CalibrationConfig):
@@ -287,13 +293,6 @@ class Camera0PnP:
             if len(detections) == 0:
                 return None
             
-            #debug
-            # if len(detections) > 0:
-            #     first_det = detections[0]
-                # print(f"\nDEBUG: First detection (tag {first_det.tag_id}):")
-                # print(f"  Corners shape: {np.asarray(first_det.corners).shape}")
-                # print(f"  Corners:\n{np.asarray(first_det.corners)}")
-            
             # Extract corners
             corners_2d = []
             corner_ids = []
@@ -323,7 +322,7 @@ class Camera0PnP:
 
                 ####
 
-                # corners are within image bounds  (5 pixel safety margin for subpixel refinement)
+                # corners are within image bounds  (5 pixel safety margin for subpixel refinement) 
                 valid = True 
                 for corner in corners:
                     if corner[0] < 5 or corner[0] >= w - 5 or corner[1] < 5 or corner[1] >= h - 5:
@@ -346,7 +345,7 @@ class Camera0PnP:
                     # tag id and it's corner indices in the tag
                     tag_corner_pairs.append((tag_id, corner_idx)) 
             
-            # atleast 4 corners 
+            # dont save if not enough corners detected 
             if len(corners_2d) < self.config.min_corners:
                 return None
             
@@ -423,11 +422,16 @@ class Camera0PnP:
             self.config.dist_coefficients,
             flags=cv2.SOLVEPNP_ITERATIVE,
             reprojectionError=self.config.ransac_reproj_threshold,  #default 8 pixels
-            confidence=self.config.ransac_confidence   #default 0.99
+            confidence=self.config.ransac_confidence   #default 0.999
         )
         
         if not success:
             return None
+        
+        # print(f"Raw tvec from OpenCV PnP: {tvec.flatten()}")
+        # print(f"  tx (X): {tvec[0, 0]:+.6f}")
+        # print(f"  ty (Y): {tvec[1, 0]:+.6f}")
+        # print(f"  tz (Z): {tvec[2, 0]:+.6f}")
         
         # rotation vector to matrix
         R_mat, _ = cv2.Rodrigues(rvec) # axis angle rotation 
@@ -437,8 +441,15 @@ class Camera0PnP:
         
         # reprojection error
         num_inliers = len(inliers) if inliers is not None else len(corners_2d)
+
+        #inliers validation
+        total_corners = len(corners_2d)
         inlier_mask = inliers.flatten() if inliers is not None else np.arange(len(corners_2d))  #corners indices that agree 
-        
+
+        #make sure enough corners are left after RANSAC
+        if num_inliers < 16:  # At least 4 tags worth of corners
+            return None
+
         # reproject inlier 3D points
         projected, _ = cv2.projectPoints(
             object_points[inlier_mask],
@@ -451,6 +462,13 @@ class Camera0PnP:
         
         errors = np.linalg.norm(corners_2d[inlier_mask] - projected, axis=1)   # detected 2d and reprojected 2d
         reproj_error = np.mean(errors)
+
+        if reproj_error > 2.0:
+            return None
+        
+        max_error = np.max(errors)
+        if max_error > 4.0:  # No single point with error > 4px
+            return None
         
         # Count unique tags
         unique_tags = len(set(cid // 4 for cid in corner_ids))
@@ -464,7 +482,7 @@ class Camera0PnP:
         visualize: bool = False,
         visualize_reprojection: bool = False,
         save_worst_cases: int = 5,
-        min_tags_required: int = 10,
+        min_tags_required: int = 5,
         save_video: bool = False,
         video_path: str = "output/detection_video.mp4"
     ) -> Dict[str, any]:
@@ -472,7 +490,7 @@ class Camera0PnP:
         Detection + PnP
         
         '''
-        print(f"Processing {len(frames)} frames for Camera 0\n")
+        print(f"Processing {len(frames)} frames for {self.config.camera_name}\n")
 
         frame_height, frame_width = None, None
         frames_written = 0
@@ -515,7 +533,7 @@ class Camera0PnP:
                 continue
             
             R_mat, t_vec, num_inliers, reproj_error, num_tags, inlier_mask = pnp_result
-            
+
             if visualize_reprojection and reproj_error > 0.3:  # Only track high errors
                 worst_frames.append((
                     reproj_error, 
@@ -533,23 +551,23 @@ class Camera0PnP:
                 worst_frames.sort(reverse=True, key=lambda x: x[0])
                 worst_frames = worst_frames[:save_worst_cases]
 
-            # Transformation matrix
-            T_target_to_cam0 = np.eye(4)
+            # Transformation matrix (T_dest_src)
+            T_cam0_target = np.eye(4)
 
             # insert estimated R and t
-            T_target_to_cam0[:3, :3] = R_mat  
-            T_target_to_cam0[:3, 3:4] = t_vec 
+            T_cam0_target[:3, :3] = R_mat  
+            T_cam0_target[:3, 3:4] = t_vec 
             
             # inverse Transformation matrix to get cam trajectory
-            T_cam0 = np.linalg.inv(T_target_to_cam0)
+            T_target_cam0 = np.linalg.inv(T_cam0_target)
             
             # result
             pose = PoseEstimate(
                 timestamp=frame.timestamp,
                 R=R_mat,
                 t=t_vec,
-                T=T_target_to_cam0,
-                T_inv=T_cam0,
+                T=T_cam0_target,
+                T_inv=T_target_cam0,
                 num_inliers=num_inliers,
                 reprojection_error=reproj_error,
                 corner_ids=corner_ids,
@@ -582,31 +600,12 @@ class Camera0PnP:
             if (i + 1) % 50 == 0:
                 success_rate = num_successful / (i + 1) * 100
                 print(f"  Processed {i+1}/{len(frames)} frames "
-                    f"(Success: {num_successful}, Failed: {num_failed}, Rate: {success_rate:.1f}%)")
+                    f"(Success: {num_successful}, Failed(no PnP solution found): {num_failed}, Rate: {success_rate:.1f}%)")
         
         if self.video_writer is not None:
             self.video_writer.release()
             print(f"  Total frames written: {frames_written}/{num_successful}")
             self.video_writer = None
-
-        # save the worse reprojected points
-        if visualize_reprojection and worst_frames:
-            print(f"\nSaving {len(worst_frames)} worst reprojection cases...")
-            Path("output/reprojection_debug").mkdir(parents=True, exist_ok=True)
-            
-            for rank, (error, frame_idx, data) in enumerate(worst_frames):
-                save_path = f"output/reprojection_debug/frame_{frame_idx:04d}_error_{error:.1f}px.jpg"
-                self.visualize_reprojection(
-                    data['image'],
-                    data['corners_2d'],
-                    data['corner_ids'],
-                    data['tag_corner_pairs'],
-                    data['R'],
-                    data['t'],
-                    reproj_error=error,
-                    save_path=save_path
-                )
-                print(f"  [{rank+1}] Frame {frame_idx}: {error:.2f} px -> {save_path}")
 
         # stats
         if not self.pose_estimates:
@@ -716,7 +715,7 @@ class Camera0PnP:
     
     def get_trajectory(self) -> Dict[float, np.ndarray]:
         '''
-        initialized cam0 trajectory as T_cam0(t_i) poses
+        Cam0 trajectory as T_target_cam0(t_i) poses (cam0 -> target)
         
         Returns:
             Dictionary mapping timestamp -> 4x4 transformation matrix
@@ -1014,50 +1013,103 @@ def visualize_aprilgrid_detection(
 
 if __name__ == "__main__":
     # Configuration
-    BAG_PATH = "/home/sid/ROAM_bag/Calib_merged.mcap"
-    CAM0_IMAGE_TOPIC = "/cam_sync/cam0/image_raw/compressed"
-    CONFIG_PATH = "/home/sid/async_vision/PnP_cam0/config/calibrationconfig.yaml"
-
-    # config
-    config = LoadConfig.load_config(CONFIG_PATH, camera_name='cam0')
+    BAG_PATH = "/home/sid/NeuROAM_data/merged_payload4b/alternate_skipped.mcap"
+    CAM0_IMAGE_TOPIC = "/cam_sync/cam0/image_raw"
+    CONFIG_PATH = "/home/sid/async_vision/test/config/calibrationconfig.yaml"
+    KALIBR_YAML = "/home/sid/async_vision/Kalibr/raw_data/decompressed_ros1-camchain.yaml"  #for kalibr baseline comparison
 
     bag_loader = ROSBagImageLoader()
-    initializer = Camera0PnP(config)
-    initializer.debug_tag_layout()
 
-    ''' Visualize detection of specific frame '''
-    # test_visualization_on_frame(
-    #     bag_path=BAG_PATH,
-    #     image_topic=CAM0_IMAGE_TOPIC,
-    #     config=config,
-    #     frame_number=140
-    # )
-    
-    ''' Pipeline '''
+    ## CAMERA 0
+    config_cam0 = LoadConfig.load_config(CONFIG_PATH, camera_name='cam0')
+    cam0_pnp = Camera0PnP(config_cam0)
+
     frames_cam0 = bag_loader.load_images_from_bag(
         bag_path=BAG_PATH,
-        image_topic=CAM0_IMAGE_TOPIC,
-        max_frames=None  # Load all frames
+        image_topic="/cam_sync/cam0/image_raw"
     )
-    
-    # Process all frames (detect + PnP)
-    stats = initializer.process_all_frames(
-        frames_cam0, 
-        visualize=True, 
-        visualize_reprojection=True, 
-        save_worst_cases=10,
-        save_video=True,
-        video_path="output/cam0_detection.avi"
-        )
-    
-    # Save results to JSON
-    initializer.save_results("output/cam0_trajectory_apriltag.json")
-    
-    # Get trajectory
-    trajectory = initializer.get_trajectory()
-    print(f"\nGenerated trajectory with {len(trajectory)} poses")
+    cam0_pnp.process_all_frames(
+        frames = frames_cam0, 
+        min_tags_required=4,
+        visualize=False, 
+        visualize_reprojection=False, 
+        save_worst_cases=5,
+        save_video=False,
+        video_path="/home/sid/async_vision/test/output/raw_data/cam0_detection.avi"
+    )
+    cam0_trajectory = cam0_pnp.get_trajectory()
 
-    ''' Save sample frames from mcap bag '''
-    # print("Saving mcap frame")
-    # save_mcap_frame(BAG_PATH, CAM0_IMAGE_TOPIC, frame_number=0, output_path="frame_0000.jpg")
-    # save_mcap_frame(BAG_PATH, CAM0_IMAGE_TOPIC, frame_number=150, output_path="frame_0150.jpg")
+    cam0_pnp.save_results("/home/sid/async_vision/test/output/raw_data/cam0_trajectory_apriltag.json")
+
+    ## CAMERA 1
+    config_cam1 = LoadConfig.load_config(CONFIG_PATH, camera_name='cam1')
+    cam1_pnp = Camera0PnP(config_cam1)  
+
+    frames_cam1 = bag_loader.load_images_from_bag(
+        bag_path=BAG_PATH,
+        image_topic="/cam_sync/cam1/image_raw"
+    )
+    cam1_pnp.process_all_frames(
+        frames=frames_cam1, 
+        min_tags_required=4,
+        visualize=False, 
+        visualize_reprojection=False, 
+        save_worst_cases=5,
+        save_video=False,
+        video_path="/home/sid/async_vision/test/output/raw_data/cam1_detection.avi"
+    )
+    cam1_trajectory = cam1_pnp.get_trajectory()
+    cam1_pnp.save_results("/home/sid/async_vision/test/output/raw_data/cam1_trajectory_apriltag.json")
+
+    ## BASELINE
+
+    # Load Kalibr baseline for comparison
+    with open(KALIBR_YAML, 'r') as f:
+        calib = yaml.safe_load(f)
+
+    T_1_0_kalibr = np.array(calib['cam1']['T_cn_cnm1'])
+
+    t_kalibr = T_1_0_kalibr[:3, 3] *1000 #Kalibr translation vector (mm)
+    R_kalibr = T_1_0_kalibr[:3, :3] # Kalibr rotation matrix
+
+    translation_errors = []
+    rotation_errors = []
+    baselines = []
+
+    #baseline magnitude
+    baseline_kalibr = np.linalg.norm(t_kalibr)  # mm
+
+    common_timestamps = sorted(set(cam0_trajectory.keys()) & set(cam1_trajectory.keys()))
+    print(f"Common timestamps found: {len(common_timestamps)}")
+
+    #poses for corresponding timestamps
+    for ts in common_timestamps:
+        T_target_cam0 = cam0_trajectory[ts]  #cam0 pose 
+        T_target_cam1 = cam1_trajectory[ts]  #cam1 pose
+        
+        T_1_0 = np.linalg.inv(T_target_cam1) @ T_target_cam0
+
+        #translation error between estimated and kalibr
+        t_computed = T_1_0[:3, 3] *1000  # mm
+        error = np.linalg.norm(t_computed - t_kalibr) 
+        translation_errors.append(error)
+
+        #rotation error
+        R_computed = T_1_0[:3, :3]
+
+        R_error = R_kalibr.T @ R_computed #close to identity if similar
+        angle_error = np.abs(R.from_matrix(R_error).magnitude())  # radians
+        angle_error_deg = np.degrees(angle_error)
+        rotation_errors.append(angle_error_deg)
+
+        #baseline magnitude check
+        baseline_computed = np.linalg.norm(t_computed)
+        baselines.append(baseline_computed)
+
+print(f"\nBaseline (translation norm):")
+print(f"  Kalibr reference: {baseline_kalibr:.2f} mm")
+print(f"  Computed - Mean: {np.mean(baselines):.2f} mm, Std: {np.std(baselines):.2f} mm")
+print(f"Rotation error - Mean: {np.mean(rotation_errors):.2f}°, Std: {np.std(rotation_errors):.2f}°")
+print(f"Translation error - Mean: {np.mean(translation_errors):.2f} mm, Std: {np.std(translation_errors):.2f} mm")
+        
+        
