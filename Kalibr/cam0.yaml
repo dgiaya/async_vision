@@ -1,0 +1,6 @@
+camera_model: pinhole
+intrinsics: [1000.0, 1000.0, 612.0, 512.0]  # fx=fy=1000, cx=width/2, cy=height/2
+distortion_model: radtan
+distortion_coeffs: [0.0, 0.0, 0.0, 0.0]  # No distortion 
+resolution: [1224, 1024]
+rostopic: /cam_sync/cam0/image_raw

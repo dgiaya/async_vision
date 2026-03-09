@@ -1,3 +1,12 @@
+'''
+Stereo Camera Timestamp Analyzer
+
+Analyzes temporal synchronization between two camera streams in an MCAP bag file.
+Extracts header timestamps from cam0 and cam1, computes per-frame time differences,
+inter-frame intervals, and frame rates, then classifies overall sync quality.
+Outputs a CSV of matched frame pairs and summary statistics to stdout.
+'''
+
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -208,14 +217,14 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         bag_path = sys.argv[1]
     else:
-        bag_path = '/home/sid/NeuROAM_data/merged_payload4b/alternate_skipped.mcap'
+        bag_path = '/home/sid/NeuROAM_data/merged_payload4b/merged_decompressed_0.mcap'
 
     cam0_topic = '/cam_sync/cam0/image_raw'
     cam1_topic = '/cam_sync/cam1/image_raw'
 
     first_five(bag_path, cam0_topic=cam0_topic, cam1_topic=cam1_topic, n_frames=5)
 
-    output_csv = '/home/sid/CS8674/scripts/timestamp_check/alternate_mcap.csv'
+    output_csv = '/home/sid/async_vision/src/scripts/timestamp_scripts/mergedDecompressedMcap.csv'
 
     # Pipeline
     results = analyze_timestamps(

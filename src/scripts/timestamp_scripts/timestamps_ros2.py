@@ -124,12 +124,12 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         bag_path = sys.argv[1]
     else:
-        bag_path = '/home/sid/ROAM_bag/calib_unsync_100ms'
+        bag_path = '/home/sid/NeuROAM_data/merged_payload4b/alternate_skipped/alternate_skipped_0.db3'
 
     # Extract timestamps
     cam0_data, cam1_data = extract_timestamps(
         bag_path=bag_path,
         cam0_topic='/cam_sync/cam0/image_raw',
         cam1_topic='/cam_sync/cam1/image_raw',
-        output_csv='timestamp_100ms.csv'
+        output_csv='/home/sid/async_vision/src/scripts/timestamp_scripts/alternateSkipped.csv'
     )
