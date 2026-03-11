@@ -1,0 +1,39 @@
+python3 /catkin_ws/src/kalibr/aslam_offline_calibration/kalibr/python/kalibr_camera_calibration/kalibr_calibrate_cameras_async.py
+
+https://docs.google.com/presentation/d/1CLyzreTGUKq_UmoXnySfDLZATC_EboXldM5EH2U-6Qo/edit?usp=sharing
+
+## Step 1 — PnP Pose Extraction:
+
+For each image, AprilGrid detector finds tags and extracts corner pixel locations
+Frames with fewer than minTagsForValidObs tags are rejected
+Detected corners are back-projected from pixels to normalized coordinates using Kalibr's distortion model (removing intrinsics and distortion)
+Normalized 2D points + known 3D target corners are passed to OpenCV's solvePnP with identity K and zero distortion
+solvePnP returns T_camera_target, Kalibr inverts to get T_t_c
+Corner outliers filtered by reprojection error (sigma threshold + absolute floor)
+Output: target0Observations and target1Observations — lists of (timestamp, PnP pose, 2D-3D correspondences)
+~1090 valid detections out of ~1300 images for cam0
+
+## Step 2 — B-Spline Construction (initPoseSpline):
+
+PnP poses inverted from T_t_c to T_c_t (camera pose in target frame)
+4×4 transformation matrices converted to 6-vectors [tx, ty, tz, rx, ry, rz] using axis-angle representation
+Time range padded by timeOffsetPadding * 2 on each end (40ms for main spline, 0 for throwaway splines)
+Rotation vectors unwrapped to prevent discontinuities — handles both θ + 2πk wrapping and (-axis, -angle) sign ambiguity
+B-spline fitted through the discrete poses using initPoseSplineSparse with specified knot density
+Output: continuous BSplinePose object queryable at any timestamp within its domain for smooth 4×4 transformation
+Spline tracks discrete poses well where data exists, oscillates freely in gaps with no detections
+
+## Step 3 — findTimeshiftPrior summary:
+
+Purpose: estimate a rough time offset between cam0 and cam1 before the main optimization
+Builds two independent splines — one from cam0 poses at cam0 timestamps, one from cam1 poses at cam1 timestamps, no padding
+The signal used is angular velocity norm — how fast each camera is rotating at each moment, a scalar value over time
+Angular velocity norm is frame-independent — both cameras experience the same rotation rate regardless of their orientation
+Cross-correlation slides one signal past the other to find the discrete shift that maximizes similarity
+Discrete shift × dT (uniform sample spacing) = time offset in seconds
+
+cam0 signal: [..., 0.1, 0.3, 0.8, 2.5, 0.9, 0.3, 0.1, 0.1, 0.1, ...]
+                                    ^peak at t=1.000
+
+cam1 signal: [..., 0.1, 0.1, 0.1, 0.1, 0.3, 0.8, 2.5, 0.9, 0.3, ...]
+                                                   ^peak at t=1.050

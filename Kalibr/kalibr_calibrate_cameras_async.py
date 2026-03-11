@@ -23,7 +23,7 @@ def initBagDataset(bagfile, topic, from_to, freq):
     print("\tDataset:          {0}".format(bagfile))
     print("\tTopic:            {0}".format(topic))
     reader = kc.BagImageDatasetReader(bagfile, topic, bag_from_to=from_to, bag_freq=freq)
-    print("\tNumber of images: {0}".format(reader.numImages()))
+    print("\tNumber of images in the bag: {0}".format(reader.numImages()))
     return reader
 
 #available models
@@ -134,11 +134,11 @@ class AsyncCalibrator():
         ## camera 0
         self.cam0Config = cam0Config
         self.dataset0 = dataset0
-        self.camera0 = kc.AslamCamera.fromParameters( self.cam0Config )
+        self.camera0 = kc.AslamCamera.fromParameters( self.cam0Config )   #load camera model from yaml
         self.setupCalibrationTarget( targetConfig, self.camera0, showExtraction=showCorners, showReproj=showReproj, imageStepping=showOneStep )
-        multithreading = not (showCorners or showReproj or showOneStep)
-        self.detector0 = self.detector
-        self.target0Observations = kc.extractCornersFromDataset(self.dataset0, self.detector0, multithreading=multithreading) #T_t_c0 pose (target pose relative to cam0 frame thru PnP)
+        multithreading = not (showCorners or showReproj or showOneStep)  #parallel processing for corner extraction if not visualizing
+        self.cam0_detector = self.detector
+        self.target0Observations = kc.extractCornersFromDataset(self.dataset0, self.cam0_detector, multithreading=multithreading) #T_t_c0 pose (target pose relative to cam0 frame thru PnP)
 
         ## camera 1
         self.cam1Config = cam1Config
@@ -146,8 +146,11 @@ class AsyncCalibrator():
         self.camera1 = kc.AslamCamera.fromParameters( self.cam1Config )
         self.setupCalibrationTarget( targetConfig, self.camera1, showExtraction=showCorners, showReproj=showReproj, imageStepping=showOneStep )
         multithreading = not (showCorners or showReproj or showOneStep)
-        self.detector1 = self.detector
-        self.target1Observations = kc.extractCornersFromDataset(self.dataset1, self.detector1, multithreading=multithreading)  #T_t_c1 pose (target pose relative to cam1 frame thru PnP)
+        self.cam1_detector = self.detector
+        self.target1Observations = kc.extractCornersFromDataset(self.dataset1, self.cam1_detector, multithreading=multithreading)  #T_t_c1 pose (target pose relative to cam1 frame thru PnP)
+
+        print("Cam0: %d/%d images had valid detections (detector + PnP)" % (len(self.target0Observations), self.dataset0.numImages()))
+        print("Cam1: %d/%d images had valid detections (detector + PnP)" % (len(self.target1Observations), self.dataset1.numImages()))
         
         # problem
         # self.problem = aopt.OptimizationProblem()
@@ -198,30 +201,41 @@ class AsyncCalibrator():
         options.imageStepping = imageStepping
         options.plotCornerReprojection = showReproj
         options.filterCornerOutliers = True
-        #options.filterCornerSigmaThreshold = 2.0
-        #options.filterCornerMinReprojError = 0.2
+        options.filterCornerSigmaThreshold = 2.0
+        options.filterCornerMinReprojError = 0.2
         self.detector = acv.GridDetector(camera.geometry, grid, options)     
 
     #initialize a pose spline using camera poses (pose spline = T_wb)
-    def initPoseSpline(self, targetObservations, splineOrder=6, poseKnotsPerSecond=200, timeOffsetPadding=0.02):
+    def initPoseSpline(self, targetObservations, splineOrder=6, poseKnotsPerSecond=200, timeOffsetPadding=0.02, label='cam'):
         '''
         poseKnotsPerSecond: number of knots per second for the pose spline (200 => 20ms)
         Eg:
-            T_t_c0: target pose relative to cam0 frame (from PnP)
-            (T_t_c0).T(): cam0 poses w.r.t target frame, for building spline (discrete poses)
+            T_t_c: target pose relative to cam frame (from PnP)
+            (T_t_c).T(): cam0 poses w.r.t target frame, for building spline (discrete poses)
         '''
         pose = bsplines.BSplinePose(splineOrder, sm.RotationVector() )
                 
-        # Get the checkerboard times.
-        cam_times = np.array([obs.time().toSec() for obs in targetObservations])       #cam detection timestamps as discrete poses      
-        cam_curves = np.matrix([ pose.transformationToCurveValue(obs.T_t_c().T()) for obs in targetObservations]).T   
+        # Get the grid detected times
+        cam_times = np.array([obs.time().toSec() for obs in targetObservations])       #cam detection discrete timestamps in seconds      
+        cam_curves = np.matrix([ pose.transformationToCurveValue(obs.T_t_c().T()) for obs in targetObservations]).T   #4x4 transformation matrix --> 6xN axis angle representation [tx, ty, tz, rx, ry, rz], each column = discrete pose 
         
         if np.isnan(cam_curves).any():
-            raise RuntimeError("Nans in cam_curves values")
+            raise RuntimeError("Nans in cam_pose values for initPoseSpline")
             sys.exit(0)
         
-        # Add 2 seconds on either end to allow the spline to slide during optimization
-        cam_times = np.hstack((cam_times[0] - (timeOffsetPadding * 2.0), cam_times, cam_times[-1] + (timeOffsetPadding * 2.0)))
+        ''' 
+        Add 2 seconds on either end to allow the spline to slide during optimization
+
+        time:
+            before: t[0], t[1], t[2], ..., t[N]
+            after:  t[0]-0.04, t[0], t[1], t[2], ..., t[N], t[N]+0.04
+
+        curve values:
+            before: pose[0], pose[1], pose[2], ..., pose[N]
+            after:  pose[0], pose[0], pose[1], pose[2], ..., pose[N], pose[N]
+       
+        '''
+        cam_times = np.hstack((cam_times[0] - (timeOffsetPadding * 2.0), cam_times, cam_times[-1] + (timeOffsetPadding * 2.0)))   #timeoffsetpadding(0.02) * 2 seconds = 0.04 = 40 ms on either end
         cam_curves = np.hstack((cam_curves[:,0], cam_curves, cam_curves[:,-1]))
         
         # Make sure the rotation vector doesn't flip
@@ -234,48 +248,67 @@ class AsyncCalibrator():
             best_dist = np.linalg.norm( best_r - previousRotationVector)
             
             for s in range(-3,4):
-                aa = axis * (angle + math.pi * 2.0 * s)
+                aa = axis * (angle + math.pi * 2.0 * s)   #angle wrapping --> axis*(angle + 2pi*s)
                 dist = np.linalg.norm( aa - previousRotationVector )
+                dist_neg = np.linalg.norm( -aa - previousRotationVector )   #axis flipped case 
                 if dist < best_dist:
                     best_r = aa
                     best_dist = dist
+                if dist_neg < best_dist:
+                    best_r = -aa
+                    best_dist = dist_neg
             cam_curves[3:6,i] = best_r;
-            
+        
+        # discrete cam0 poses from PnP 
+        np.savetxt('/data/poses_discrete_%s.csv' % label, 
+            np.hstack((cam_times.reshape(-1,1), cam_curves.T)), 
+            delimiter=',', 
+            header='t,tx,ty,tz,rx,ry,rz')
+
+        # Fitting the spline    
         seconds = cam_times[-1] - cam_times[0]
         knots = int(round(seconds * poseKnotsPerSecond))
         
         print("")
         print("Initializing a pose spline with %d knots (%f knots per second over %f seconds)" % ( knots, poseKnotsPerSecond, seconds))
         pose.initPoseSplineSparse(cam_times, cam_curves, knots, 1e-4)
+        
+        # Dense sampling to visualize smoothness
+        dense_times = np.linspace(cam_times[0], cam_times[-1], 5000)
+        dense_curves = np.array([pose.eval(t) for t in dense_times]).T
+        np.savetxt('/data/poses_spline_dense_%s.csv' % label,
+                np.hstack((dense_times.reshape(-1,1), dense_curves.T)),
+                delimiter=',',
+                header='t,tx,ty,tz,rx,ry,rz')
+        
         return pose   
     
     def findTimeshiftPrior(self, verbose=False):
         print("Estimating time shift camera 1 to camera 0:")
         
         #fit a spline to the camera observations
-        poseSplineCam0 = self.initPoseSpline( self.target0Observations, timeOffsetPadding=0.0 )
-        poseSplineCam1 = self.initPoseSpline( self.target1Observations, timeOffsetPadding=0.0 )
+        poseSplineCam0 = self.initPoseSpline( self.target0Observations, timeOffsetPadding=0.0, label='cam0_prior')
+        poseSplineCam1 = self.initPoseSpline( self.target1Observations, timeOffsetPadding=0.0, label='cam1_prior' )
         
-        #predict time shift prior 
-        t=[]
-        omega_cam0_norm = []   #reference 
+        omega_cam0_norm = []
         omega_cam1_norm = []
-        
-        # for cam0 observations
-        for obs in self.target0Observations:
-            tk = obs.time().toSec()
-            # angular velocity priors only for common spline time range 
-            if tk > poseSplineCam0.t_min() and tk < poseSplineCam0.t_max() and tk > poseSplineCam1.t_min() and tk < poseSplineCam1.t_max():
-                
-                #get spline angular velocity priors for cam0 and cam1
-                omega_cam0 = aopt.EuclideanExpression( np.matrix( poseSplineCam0.angularVelocityBodyFrame( tk ) ).transpose() )
-                omega_cam1 = aopt.EuclideanExpression( np.matrix( poseSplineCam1.angularVelocityBodyFrame( tk ) ).transpose() )   #cam1 
 
-                #calc norm
-                t = np.hstack( (t, tk) )
-                omega_cam0_norm = np.hstack( (omega_cam0_norm, np.linalg.norm( omega_cam0.toEuclidean() ) ))
-                omega_cam1_norm = np.hstack( (omega_cam1_norm, np.linalg.norm( omega_cam1.toEuclidean() )) )
-        
+        # Uniform time grid over overlapping range
+        t_start = max(poseSplineCam0.t_min(), poseSplineCam1.t_min())
+        t_end = min(poseSplineCam0.t_max(), poseSplineCam1.t_max())
+        dT = 0.01  # 10ms grid spacing
+        uniform_times = np.arange(t_start, t_end, dT)
+
+        for tk in uniform_times:
+            omega0 = aopt.EuclideanExpression(np.matrix(poseSplineCam0.angularVelocityBodyFrame(tk)).transpose())
+            omega1 = aopt.EuclideanExpression(np.matrix(poseSplineCam1.angularVelocityBodyFrame(tk)).transpose())
+            omega_cam0_norm.append(np.linalg.norm(omega0.toEuclidean()))
+            omega_cam1_norm.append(np.linalg.norm(omega1.toEuclidean()))
+
+        omega_cam0_norm = np.array(omega_cam0_norm)
+        omega_cam1_norm = np.array(omega_cam1_norm)
+
+        #verify
         if len(omega_cam1_norm) == 0 or len(omega_cam0_norm) == 0:
             sm.logFatal("The time ranges of the camera 0 and camera 1 do not overlap. "\
                         "Please make sure that your sensors are synchronized correctly.")
@@ -286,22 +319,20 @@ class AsyncCalibrator():
             sm.logFatal("Cam1 first observation: {0}".format(self.target1Observations[0].time().toSec()))
             sm.logFatal("Cam1 last observation: {0}".format(self.target1Observations[-1].time().toSec()))
             sys.exit(-1)
-        
-        #get the time shift
-        corr = np.correlate(omega_cam1_norm, omega_cam0_norm, "full")  #cross correlation of the norms of the angular velocities (the shift that maximizes this correlation is the time shift prior)
-        discrete_shift = corr.argmax() - (np.size(omega_cam0_norm) - 1)
-        
-        #get cont. time shift
-        times = [obs.time().toSec() for obs in self.target0Observations]
-        dT = np.mean(np.diff( times ))
-        shift = -discrete_shift*dT
+
+        # Cross-correlate
+        corr = np.correlate(omega_cam1_norm, omega_cam0_norm, "full")
+        discrete_shift = corr.argmax() - (len(omega_cam0_norm) - 1)
+        shift = -discrete_shift * dT
         
         #Create plots
         if verbose:
-            pl.plot(t, omega_cam0_norm, label="measured_raw")
-            pl.plot(t, omega_cam1_norm, label="predicted")
-            pl.plot(t-shift, omega_cam0_norm, label="measured_corrected")
+            pl.plot(uniform_times, omega_cam0_norm, label="measured_raw")
+            pl.plot(uniform_times, omega_cam1_norm, label="predicted")
+            pl.plot(uniform_times-shift, omega_cam0_norm, label="measured_corrected")
             pl.legend()
+            pl.xlabel("Lag (samples)")
+            pl.ylabel("Correlation (sum of products of angular velocity rad^2/s^2)")
             pl.title("Time shift prior cam0-cam1 estimation")
             pl.figure()
             pl.plot(corr)
@@ -452,7 +483,7 @@ class AsyncCalibrator():
         #######################
         ## cam0 pose spline initialized 
         #######################
-        poseSpline = self.initPoseSpline(self.target0Observations, splineOrder, poseKnotsPerSecond, timeOffsetPadding)
+        poseSpline = self.initPoseSpline(self.target0Observations, splineOrder, poseKnotsPerSecond, timeOffsetPadding, label="cam0_main")
         
         # initialize design variables
         poseSplineDv = asp.BSplinePoseDesignVariable( poseSpline )
@@ -505,7 +536,7 @@ class AsyncCalibrator():
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_exit)
     
-    bagfile = '/data/merged_payload4b/alternateSkipped.bag'
+    bagfile = '/data/merged_payload4b/decompressed_ros1.bag'
     cam0YamlFile = '/data/cam0.yaml'
     cam1YamlFile = '/data/cam1.yaml'
     targetYamlFile = '/data/aprilgrid.yaml'
